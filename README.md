@@ -31,4 +31,6 @@ Expiration rules should specify a number and a unit, where unit should be one of
 
 Lines starting with a '#' are considered comments and will be ignored.
 
-Please see the [example configuration](zrep-expire.conf) for some example rules.
+Please see the [example configuration](zrep-expire.conf) for some example rules. They should be self-explanatory.
+
+Please note that rules are matched from bottom to top, so put the most specific ones at the bottom and the default at the top.
