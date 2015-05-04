@@ -3,7 +3,7 @@ Zrep snapshot expiration tool
 
 This is a python script to help with the retention and expiration of snapshots that were created with [zrep](http://www.bolthole.com/solaris/zrep/).
 
-It can take a [configuration file](zrep-expire.conf), in which the retention schedule can be specified in a cron-like table.
+It can take a [configuration file](zrep-expire.conf), in which the retention schedule can be specified in a crontab-like table.
 
 The script is meant to be run from cron, like this:
 
@@ -19,7 +19,7 @@ At this time, zrep-expire does not consider diffent filesystems, so it operates 
 
 ## Configuration
 
-The configuration file should contain a list of expiration rule, each consisting of 6 fields, resembling a crontab entry:
+The configuration file should contain a list of expiration rules, each consisting of 6 fields, resembling a crontab entry:
 
     # MIN HR         DOM  MON  DOW  EXPIRATION
 
