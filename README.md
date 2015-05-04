@@ -17,7 +17,7 @@ Its workings are simple:
 
 ## Configuration
 
-The configuration file should contain a list of expiration rule, each consisting of 6 fields, resembling a crontab:
+The configuration file should contain a list of expiration rule, each consisting of 6 fields, resembling a crontab entry:
 
     # MIN HR         DOM  MON  DOW  EXPIRATION
 
