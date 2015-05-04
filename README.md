@@ -15,6 +15,8 @@ Its workings are simple:
 2. It matches the time of snapshot creation against the expiration rules in the configuration.
 3. If the snapshot should be expired according to the rules, it tries to destroy the snapshot, unless the custom local property 'zrep:sent' does not contain an integer value, which means that the snapshot was not created by zrep or something else went wrong.
 
+At this time, zrep-expire does not consider diffent filesystems, so it operates on all snapshots of all filesystems at once. This means you cannot have different expiration rules for different filesystems. It also means that the fact that 'it will never expire the last remaining snapshot' should be taken quite literally. If at some point there is a demand for filesystem awareness in zrep-expire, please create an issue with a feature request, or implement it yourself and send a me a pull request :-)
+
 ## Configuration
 
 The configuration file should contain a list of expiration rule, each consisting of 6 fields, resembling a crontab entry:
