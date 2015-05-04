@@ -1,0 +1,154 @@
+#!/usr/bin/python
+
+from datetime import datetime, timedelta
+import subprocess
+from dateutil.relativedelta import relativedelta # apt-get install python-dateutil
+from pprint import pprint
+import sys
+import argparse
+
+# In expiration rule, the following keywords are understood:
+# years, months, weeks, days, hours, minutes, seconds, microseconds
+# Typos will lead to
+# TypeError: __init__() got an unexpected keyword argument
+# during parsing
+
+rules = [
+#    MIN HR         DOM  MON  DOW  EXPIRATION
+    '*   *          *    *    *    +48 hours',
+    '*   20-23      *    *    *    +15 days',
+    '*   20-23      *    *    7    +4 weeks',
+    '*   20-23      1-7  *    7    +6 months',
+    '*   20-23      1-7  1    7    +5 years'
+]
+
+weekdays = { 'sun': 1, 'mon': 2, 'tue': 3, 'wed': 4, 'thu': 5, 'fri': 6, 'sat': 7 }
+created_fmt = '%a %b %d %H:%M %Y'
+NOW = datetime.now()
+
+# http://stackoverflow.com/questions/373335/how-do-i-get-a-cron-like-scheduler-in-python
+class AllMatch(set):
+    """Universal set - match everything"""
+    def __contains__(self, item): return True
+
+allMatch = AllMatch()
+
+def day_to_int(day):
+    if day in weekdays:
+        return weekdays[day]
+    else:
+        return day
+
+def process_options ():
+    parser = argparse.ArgumentParser(description='Zrep snapshot expiration tool',
+        formatter_class=lambda prog: argparse.ArgumentDefaultsHelpFormatter(prog, max_help_position=38, width=120))
+    parser.add_argument('-c', '--config', action='store', dest='config', default=None, help='path to configuration file')
+    args = parser.parse_args()
+    return args.config
+
+def convert_to_set(item):
+    if item == '*':
+        return allMatch
+    vals = set()
+    ranges = item.split(',')
+    for r in ranges:
+        limits = r.split('-')
+        if len(limits) == 2:
+            vals.update( set( range( int( day_to_int( limits[0] ) ), int( day_to_int( limits[1] ) ) + 1 ) ) )
+        else:
+            vals.add( int( day_to_int( limits[0] ) ) )
+    return vals
+
+def match_time (rule, t):
+    if isinstance( t, ( int, long ) ):
+        t = datetime.fromtimestamp(t)
+
+    # Convert Python weekdays to Cron weekdays
+    wd = t.weekday() + 2
+    if wd == 8:  # Sunday
+        wd = 1
+    return ( ( t.minute in rule['mins'] ) and
+             ( t.hour   in rule['hrs']  ) and
+             ( t.day    in rule['days'] ) and
+             ( t.month  in rule['mon']  ) and
+             ( wd       in rule['dow']  ))
+
+def parse_rules(therules):
+    parsed_rules = []
+    for r in reversed(therules):
+        # Ignore comments
+        if r.strip()[0] == '#':
+            continue
+        items = r.split(None, 5)
+        mins = convert_to_set(items[0])
+        hrs  = convert_to_set(items[1])
+        days = convert_to_set(items[2])
+        mon  = convert_to_set(items[3])
+        dow  = convert_to_set(items[4])
+        rule = { 'mins': mins, 'hrs': hrs, 'days': days, 'mon': mon, 'dow': dow, 'expiration': items[5].strip() }
+        parsed_rules.append( rule )
+    return parsed_rules
+
+# Pass the parsed rules
+def get_expiration(rules, created):
+    for r in rules:
+        if match_time(r, created):
+            return r['expiration']
+
+def parse_expiration(exp):
+    num, unit = exp.split(None, 2)
+    return relativedelta(**{ unit: int(num) })
+
+def get_expiration_time(rules, created):
+    exp = get_expiration( rules, created )
+    return created + parse_expiration( exp )
+
+config = process_options()
+if config is not None:
+    try:
+        with file(config) as f:
+            rules = f.readlines()
+    except IOError as e:
+        print(e)
+        sys.exit(1)
+
+parsed_rules = parse_rules(rules)
+
+cmd = [ '/sbin/zfs', 'list', '-H', '-t', 'snapshot', '-o', 'name,zrep:sent,creation' ]
+
+try:
+    snapshots = subprocess.check_output(cmd).split("\n")
+except subprocess.CalledProcessError as e:
+    sys.exit(1)
+
+# Strip whitespace, remove empty lines and the last snapshot from the list
+snapshots = filter(lambda x: len( x ) > 0, ( line.strip() for line in snapshots ) )[0:-1]
+
+for line in snapshots:
+    fields = line.split(None, 2)
+    snapname = fields[0]
+    zrepsent = fields[1]
+    created = datetime.strptime( fields[2], created_fmt )
+    tstr = created.strftime('%Y-%m-%d %H:%M:%S')
+    exptime = get_expiration_time(parsed_rules, created)
+
+    if exptime <= NOW:
+        actionstr = 'EXPIRING'
+        tstr = created.strftime('%Y-%m-%d %H:%M')
+        expstr = exptime.strftime('%Y-%m-%d %H:%M')
+        print "Snapshot %s, created %s, expiring: %s => %s" % (snapname, tstr, expstr, actionstr)
+
+        try:
+            sent = int(zrepsent)
+            cmd = [ '/sbin/zfs', 'destroy', snapname ]
+            ret = subprocess.call( cmd )
+            if ret == 0:
+                print "Succeeded"
+            else:
+                print "Error!"
+
+        except ValueError:
+            print "Error: snapshot %s property zrep:sent is not an integer: %s. Skipping." % (snapname, zrepsent)
+
+
+# vim: ts=4 sw=4 et
