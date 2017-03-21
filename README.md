@@ -20,7 +20,7 @@ This is a python script to help with the retention and expiration of snapshots t
       -a, --all                   act on all ZFS filesystems (default: False)
       --zrep-ignore               act on all snapshots, not just zrep (default: False)
 
-The script is developed and tested with Python 2.7. It has one external dependency: [*parsedatetime*](https://github.com/bear/parsedatetime). On Debian systems, you can install it with `apt-get install python-parsedatetime`. [package in Testing](https://packages.debian.org/testing/python-parsedatetime)
+The script is developed and tested with Python 2.7. It has one external dependency: [*parsedatetime*](https://github.com/bear/parsedatetime). On Debian systems, you can install it with `apt-get install python-parsedatetime` ([package in Testing](https://packages.debian.org/testing/python-parsedatetime)).
 
 The program can take a [configuration file](zrep-expire.conf), in which the retention schedule can be specified.
 
