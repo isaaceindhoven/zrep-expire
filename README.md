@@ -1,38 +1,59 @@
 # zrep-expire
-Zrep snapshot expiration tool
+Zrep snapshot expiration tool (v2)
 
 This is a python script to help with the retention and expiration of snapshots that were created with [zrep](http://www.bolthole.com/solaris/zrep/).
 
-It can take a [configuration file](zrep-expire.conf), in which the retention schedule can be specified in a crontab-like table.
+    usage: zrep-expire [-h] [-c CONFIG] [-k KEEP] [-v] [-d] [-n] [-a] [--zrep-ignore] [filesystem [filesystem ...]]
+
+    Zrep snapshot expiration tool
+
+    positional arguments:
+      filesystem                  the filesystem(s) to act on (default: None)
+
+    optional arguments:
+      -h, --help                  show this help message and exit
+      -c CONFIG, --config CONFIG  path to configuration file (default: None)
+      -k KEEP, --keep KEEP        keep the last n snapshots (default: 5)
+      -v, --verbose               output verbose information (default: False)
+      -d, --debug                 output even more verbose information (default: False)
+      -n, --noop                  list snapshots and results but do not act (default: False)
+      -a, --all                   act on all ZFS filesystems (default: False)
+      --zrep-ignore               act on all snapshots, not just zrep (default: False)
+
+The script is developed and tested with Python 2.7. It has one exteral dependency: *parsedatetime*. On Debian systems, you can install it with `apt-get install python-parsedatetime`.
+
+The program can take a [configuration file](zrep-expire.conf), in which the retention schedule can be specified.
+
+The default retention configuration is this:
+
+    # MAX_AGE : MIN_INTERVAL
+     1 hour   : 1 minute
+     12 hours : 5 minutes
+     8 days   : 1 hour
+     32 days  : 1 day
+     1 year   : 1 week
+     5 years  : 1 month
 
 The script is meant to be run from cron, like this:
 
-    55 6 * * * /usr/local/bin/zrep-expire -c /etc/zfs/zrep-expire.conf
+    55 * * * * /usr/local/bin/zrep-expire -c /etc/zfs/zrep-expire.conf -v -a
 
 Its workings are simple:
 
-1. It gets a list of all existing ZFS snapshots and removes the most recent one from the list, so it will never expire the last remaining snapshot.
-2. It matches the time of snapshot creation against the expiration rules in the configuration.
-3. If the snapshot should be expired according to the rules, it tries to destroy the snapshot, unless the custom local property 'zrep:sent' does not contain an integer value, which means that the snapshot was not created by zrep or something else went wrong.
+1. For each ZFS filesystem specified as command line arguments, or for each ZFS filesystem found with `-a`, it gets a list of all existing snapshots. It removes the last `KEEP` snapshots from the list, so they will never be removed.
+2. If a snapshot is not created by `zrep`, it will be skipped unless the `--zrep-ignore` option is specified.
+3. It matches the creation time of the snapshot against the first column (`MAX_AGE`) of the expiration rule, so see which retention interval should be applied.
+4. If the time delta between the current snapshot and the previous one is smaller than `MIN_INTERVAL`, the snapshot is removed.
 
-At this time, zrep-expire does not consider diffent filesystems, so it operates on all snapshots of all filesystems at once. This means you cannot have different expiration rules for different filesystems. It also means that the fact that 'it will never expire the last remaining snapshot' should be taken quite literally. If at some point there is a demand for filesystem awareness in zrep-expire, please create an issue with a feature request, or implement it yourself and send a me a pull request :-)
+If one set of expiration rules is sufficient for all of your filesystems, run `zrep-expire` with the `-a` option. If you need different expiration rules for different file systems, run a separate `zrep-expire` for each one, specifying the filesystem as a command line argument.
 
-## Configuration
+The order of the rules in the configuration file is not important. The rules will be sorted and applied in the correct order.
 
-The configuration file should contain a list of expiration rules, each consisting of 6 fields, resembling a crontab entry:
+The values in the configuration file will be parsed with [parsedatetime](https://github.com/bear/parsedatetime), where the first column will be used as a negative offset to the current time, and the second column will be used a timedelta to compare a snapshot to the previous one. `parsedatetime` is quite liberal in what it will parse to some meaningful value, so '2h' will work just like '2 hours'.
 
-    # MIN HR         DOM  MON  DOW  EXPIRATION
+## Differences with version 1
 
-meaning minutes, hours, day of month, month, day of week and expiration rule.
+The current version of the script (let's call it v2) is written from scratch, because the cron-like configuration of v1 didn't fit my current use case anymore. The cron-like retention scheme required you to know the exact times when snapshots are created, or you had to use a time range for each rule, but that didn't work well when multiple/many snapshots exist in a small time frame. In other words, there was no way to say that out of 3 snapshots made in a certain time frame (which could be 1 minute!) you only want to keep one.
 
-The first 5 fields define the time to match the snapshot creation time with. Each field can take an integer value, a range (x-y), a list of values and/or ranges (a,x,y-z) or a literal '*', which means 'any'.
+The new scheme is much simpler. You just specify what the minimum time between snapshots should be for a specific time frame, and `zrep-expire` removes all snapshots that are redundant. For example, if you create 3 snapshots per minute and you tell `zrep-expire` you want a minimum interval of 1 minute, it will keep the first snapshot for every minute and remove the other two. It also means, that if your snapshot creation times are somewhat irregular, you don't have to worry about that, because the script will only check if the elapsed time since the last snapshot has been *long enough*. It's great.
 
-For day-of-week, '1' means 'Sunday', '2' Monday, etc.
-
-Expiration rules should specify a number and a unit, where unit should be one of 'years', 'months', 'weeks', 'days', 'hours', 'minutes', 'seconds', 'microseconds'.
-
-Lines starting with a '#' are considered comments and will be ignored.
-
-Please see the [example configuration](zrep-expire.conf) for some example rules. They should be self-explanatory.
-
-Please note that rules are matched from bottom to top, so put the most specific ones at the bottom and the default at the top.

@@ -2,108 +2,116 @@
 
 from datetime import datetime, timedelta
 import subprocess
-from dateutil.relativedelta import relativedelta # apt-get install python-dateutil
-from pprint import pprint
+import parsedatetime as pdt     # apt-get install python-parsedatetime
 import sys
 import argparse
-
-# In expiration rule, the following keywords are understood:
-# years, months, weeks, days, hours, minutes, seconds, microseconds
-# Typos will lead to
-# TypeError: __init__() got an unexpected keyword argument
-# during parsing
+import re
+from pprint import pprint,pformat
 
 rules = [
-#    MIN HR         DOM  MON  DOW  EXPIRATION
-    '*   *          *    *    *    +48 hours',
-    '*   20-23      *    *    *    +15 days',
-    '*   20-23      *    *    7    +4 weeks',
-    '*   20-23      1-7  *    7    +6 months',
-    '*   20-23      1-7  1    7    +5 years'
+#    MAX_AGE  : MIN_INTERVAL
+    '1 hour   : 1 minute',
+    '12 hours : 5 minutes',
+    '8 days   : 1 hour',
+    '32 days  : 1 day',
+    '1 year   : 1 week',
+    '5 years  : 1 month'
 ]
 
-weekdays = { 'sun': 1, 'mon': 2, 'tue': 3, 'wed': 4, 'thu': 5, 'fri': 6, 'sat': 7 }
 created_fmt = '%a %b %d %H:%M %Y'
-NOW = datetime.now()
 
-# http://stackoverflow.com/questions/373335/how-do-i-get-a-cron-like-scheduler-in-python
-class AllMatch(set):
-    """Universal set - match everything"""
-    def __contains__(self, item): return True
+class ContinueLoop(Exception):
+    pass
 
-allMatch = AllMatch()
+def verbose(str):
+    if options.verbose or options.noop:
+        print(datetime.now().strftime("%Y-%m-%d %H:%M:%S") + ' ' + str)
 
-def day_to_int(day):
-    if day in weekdays:
-        return weekdays[day]
-    else:
-        return day
+def debug(str):
+    if options.debug or options.noop:
+        print(datetime.now().strftime("%Y-%m-%d %H:%M:%S") + ' ' + str)
 
 def process_options ():
     parser = argparse.ArgumentParser(description='Zrep snapshot expiration tool',
         formatter_class=lambda prog: argparse.ArgumentDefaultsHelpFormatter(prog, max_help_position=38, width=120))
     parser.add_argument('-c', '--config', action='store', dest='config', default=None, help='path to configuration file')
+    parser.add_argument('-k', '--keep', action='store', dest='keep', type=int, default=5, help='keep the last n snapshots')
+    parser.add_argument('-v', '--verbose', action='store_true', dest='verbose', help='output verbose information')
+    parser.add_argument('-d', '--debug', action='store_true', dest='debug', help='output even more verbose information')
+    parser.add_argument('-n', '--noop', action='store_true', dest='noop', help='list snapshots and results but do not act')
+    parser.add_argument('-a', '--all', action='store_true', dest='allfs', help='act on all ZFS filesystems')
+    parser.add_argument('--zrep-ignore', action='store_true', dest='zrepignore', help='act on all snapshots, not just zrep')
+    parser.add_argument('filesystem', nargs='*', default=None, help='the filesystem(s) to act on')
     args = parser.parse_args()
-    return args.config
-
-def convert_to_set(item):
-    if item == '*':
-        return allMatch
-    vals = set()
-    ranges = item.split(',')
-    for r in ranges:
-        limits = r.split('-')
-        if len(limits) == 2:
-            vals.update( set( range( int( day_to_int( limits[0] ) ), int( day_to_int( limits[1] ) ) + 1 ) ) )
-        else:
-            vals.add( int( day_to_int( limits[0] ) ) )
-    return vals
-
-def match_time (rule, t):
-    if isinstance( t, ( int, long ) ):
-        t = datetime.fromtimestamp(t)
-
-    # Convert Python weekdays to Cron weekdays
-    wd = t.weekday() + 2
-    if wd == 8:  # Sunday
-        wd = 1
-    return ( ( t.minute in rule['mins'] ) and
-             ( t.hour   in rule['hrs']  ) and
-             ( t.day    in rule['days'] ) and
-             ( t.month  in rule['mon']  ) and
-             ( wd       in rule['dow']  ))
+    return args
 
 def parse_rules(therules):
     parsed_rules = []
-    for r in reversed(therules):
+    for r in therules:
         # Ignore comments
         if r.strip()[0] == '#':
             continue
-        items = r.split(None, 5)
-        mins = convert_to_set(items[0])
-        hrs  = convert_to_set(items[1])
-        days = convert_to_set(items[2])
-        mon  = convert_to_set(items[3])
-        dow  = convert_to_set(items[4])
-        rule = { 'mins': mins, 'hrs': hrs, 'days': days, 'mon': mon, 'dow': dow, 'expiration': items[5].strip() }
-        parsed_rules.append( rule )
+        items = r.split(':',2)
+        period = items[0].strip()
+        interval = re.sub('#.*', '', items[1]).strip()
+
+        num0, unit0 = period.split(None, 2)
+        num1, unit1 = interval.split(None, 2)
+        try:
+            p0 = cal.parseDT('-' + period)[0]
+            i0 = cal.parseDT(interval, sourceTime=datetime.min)[0] - datetime.min
+        except TypeError as e:
+            print(e)
+            continue
+
+        rule = ( p0, i0 )
+        parsed_rules.append(rule)
+
+    # Sort the rules so the longest retention comes first
+    parsed_rules.sort(key=lambda tup: tup[0])
     return parsed_rules
 
-# Pass the parsed rules
-def get_expiration(rules, created):
-    for r in rules:
-        if match_time(r, created):
-            return r['expiration']
+def get_all_filesystems():
+    cmd = [ '/sbin/zfs', 'list', '-H', '-o', 'name' ]
+    try:
+        filesystems = subprocess.check_output(cmd).split("\n")
+        filesystems = sorted(filter(lambda x: len( x ) > 0, ( line.strip() for line in filesystems ) ))
+        return filesystems
+    except subprocess.CalledProcessError as e:
+        sys.exit(1)
 
-def parse_expiration(exp):
-    num, unit = exp.split(None, 2)
-    return relativedelta(**{ unit: int(num) })
+def get_all_snapshots(fs, keep):
+    cmd = [ '/sbin/zfs', 'list', '-H', '-t', 'snapshot', '-o', 'name,zrep:sent,creation', '-s', 'creation', '-d', '1', '-r', fs ]
+    try:
+        snapshots = subprocess.check_output(cmd).split("\n")
+        snapshots = filter(lambda x: len( x ) > 0, ( line.strip() for line in snapshots ) )[0:-keep]
+        return snapshots
+    except subprocess.CalledProcessError as e:
+        sys.exit(1)
 
-def get_expiration_time(rules, created):
-    exp = get_expiration( rules, created )
-    return created + parse_expiration( exp )
+    # Strip whitespace, remove empty lines and the last snapshot from the list
 
-config = process_options()
+def expire(snapshot):
+    if not options.noop:
+        cmd = [ '/sbin/zfs', 'destroy', snapshot ]
+        ret = subprocess.call( cmd )
+        if ret != 0:
+            print("Error expiring %s, status was %d" % (snapshot, ret))
+
+def human_delta(delta):
+    days = delta.days
+    seconds = delta.seconds
+    hours = int(seconds / 3600)
+    seconds = seconds % 3600
+    minutes = int(seconds / 60)
+    seconds = seconds % 60
+    return "%d+%d:%02d:%02d" % (days,hours,minutes,seconds)
+
+continue_loop = ContinueLoop()
+cal = pdt.Calendar()
+
+options = process_options()
+config = options.config
 if config is not None:
     try:
         with file(config) as f:
@@ -114,41 +122,84 @@ if config is not None:
 
 parsed_rules = parse_rules(rules)
 
-cmd = [ '/sbin/zfs', 'list', '-H', '-t', 'snapshot', '-o', 'name,zrep:sent,creation' ]
+keep = options.keep
+if keep < 1:
+    keep = 1
 
-try:
-    snapshots = subprocess.check_output(cmd).split("\n")
-except subprocess.CalledProcessError as e:
-    sys.exit(1)
+filesystems = options.filesystem
+if options.allfs:
+    filesystems = get_all_filesystems()
 
-# Strip whitespace, remove empty lines and the last snapshot from the list
-snapshots = filter(lambda x: len( x ) > 0, ( line.strip() for line in snapshots ) )[0:-1]
+for fs in filesystems:
 
-for line in snapshots:
-    fields = line.split(None, 2)
-    snapname = fields[0]
-    zrepsent = fields[1]
-    created = datetime.strptime( fields[2], created_fmt )
-    tstr = created.strftime('%Y-%m-%d %H:%M:%S')
-    exptime = get_expiration_time(parsed_rules, created)
+    snapshots = get_all_snapshots(fs, keep)
+    n = len(snapshots)
 
-    if exptime <= NOW:
-        actionstr = 'EXPIRING'
-        tstr = created.strftime('%Y-%m-%d %H:%M')
-        expstr = exptime.strftime('%Y-%m-%d %H:%M')
-        print "Snapshot %s, created %s, expiring: %s => %s" % (snapname, tstr, expstr, actionstr)
+    last_kept = None
+
+    for i, line in enumerate(snapshots):
+        fields = line.split(None, 2)
+        snapname = fields[0]
+        zrepsent = fields[1]
+        created = datetime.strptime( fields[2], created_fmt )
+        created_str = created.strftime('%Y-%m-%d %H:%M:%S')
+
+        if re.match('.*@zrep_[0-9a-f]{6}', snapname) is None and options.zrepignore is False:
+            debug('Snapshot: %s not created by zrep; igoring. Use --zrep-ignore to overrride' % snapname)
+            continue
+
+        if last_kept is not None:
+            last_kept_str = last_kept.strftime('%Y-%m-%d %H:%M:%S')
+
+        # Is snapshot older than longest retention?
+        if created < parsed_rules[0][0]:
+            verbose("Snapshot: %s, created %s, oldest backup must be created after %s => EXPIRING" % (snapname,
+                created_str, parsed_rules[0][0].strftime('%Y-%m-%d %H:%M:%S')))
+            expire(snapname)
+            continue
+
+        # Snapshot is eligible for keeping. Keep the oldest backup.
+        if last_kept is None:
+            debug("Snapshot: %s, created %s, it is the first one => KEEPING" % (snapname, created_str))
+            last_kept = created
+            continue
+
+        # From this point we can assume that last_kept is set
+
+        last_interval = parsed_rules[0][1]
+        delta = created - last_kept
 
         try:
-            sent = int(zrepsent)
-            cmd = [ '/sbin/zfs', 'destroy', snapname ]
-            ret = subprocess.call( cmd )
-            if ret == 0:
-                print "Succeeded"
-            else:
-                print "Error!"
+            for r in parsed_rules:
 
-        except ValueError:
-            print "Error: snapshot %s property zrep:sent is not an integer: %s. Skipping." % (snapname, zrepsent)
+                msg = "Snapshot: %s, created: %s, last kept: %s, delta: %s, interval: %s => %%s" % (snapname,
+                    created_str, last_kept_str, human_delta(delta), human_delta(last_interval))
 
+                if created < r[0]:
+                    # The snapshot is older than the current rule handles. Use interval of the previous rule.
+                    if delta < last_interval:
+                        verbose(msg % 'EXPIRING')
+                        expire(snapname)
+                    else:
+                        debug(msg % 'KEEPING')
+                        last_kept = created
 
-# vim: ts=4 sw=4 et
+                    # Break the parsed_rules loop and continue the snapshots loop
+                    raise continue_loop
+
+                last_interval = r[1]
+
+        except ContinueLoop:
+            continue
+
+        # The snapshot is young enough for the most recent category. Use the current interval for expiry.
+        msg = "Snapshot: %s, created: %s, last kept: %s, delta: %s, interval: %s => %%s" % (snapname,
+            created_str, last_kept_str, human_delta(delta), human_delta(last_interval))
+
+        if delta < last_interval:
+            verbose(msg % 'EXPIRING')
+            expire(snapname)
+        else:
+            debug(msg % 'KEEPING')
+            last_kept = created
+
