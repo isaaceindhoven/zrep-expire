@@ -1,12 +1,16 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 
 from datetime import datetime, timedelta
 import subprocess
-import parsedatetime as pdt     # apt-get install python-parsedatetime
+import parsedatetime as pdt     # apt install python3-parsedatetime
 import sys
 import argparse
 import re
 from pprint import pprint,pformat
+
+# This program calls the 'zfs' utility to gather information. The output of the command is decoded
+# as UTF-8. If your system locale doesn't use UTF-8 encoding, change the 'get_all_filesystems'
+# and 'get_all_snapshots' functions as needed.
 
 rules = [
 #    MAX_AGE  : MIN_INTERVAL
@@ -41,6 +45,7 @@ def process_options ():
     parser.add_argument('-n', '--noop', action='store_true', dest='noop', help='list snapshots and results but do not act')
     parser.add_argument('-a', '--all', action='store_true', dest='allfs', help='act on all ZFS filesystems')
     parser.add_argument('--zrep-ignore', action='store_true', dest='zrepignore', help='act on all snapshots, not just zrep')
+    parser.add_argument('-t', '--tags', action='store', dest='tags', default='zrep', help='comma-separated list of zreptags to act on')
     parser.add_argument('filesystem', nargs='*', default=None, help='the filesystem(s) to act on')
     args = parser.parse_args()
     return args
@@ -74,22 +79,31 @@ def parse_rules(therules):
 def get_all_filesystems():
     cmd = [ '/sbin/zfs', 'list', '-H', '-o', 'name' ]
     try:
-        filesystems = subprocess.check_output(cmd).split("\n")
+        filesystems = subprocess.check_output(cmd).decode('utf-8').split("\n")
         filesystems = sorted(filter(lambda x: len( x ) > 0, ( line.strip() for line in filesystems ) ))
         return filesystems
     except subprocess.CalledProcessError as e:
         sys.exit(1)
 
-def get_all_snapshots(fs, keep):
-    cmd = [ '/sbin/zfs', 'list', '-H', '-t', 'snapshot', '-o', 'name,zrep:sent,creation', '-s', 'creation', '-d', '1', '-r', fs ]
+def get_all_snapshots(fs, keep, tag, zrepignore=False):
+    cmd = [ '/sbin/zfs', 'list', '-H', '-t', 'snapshot', '-o', 'name,%s:sent,creation' % tag, '-s', 'creation', '-d', '1', '-r', fs ]
     try:
-        snapshots = subprocess.check_output(cmd).split("\n")
-        snapshots = filter(lambda x: len( x ) > 0, ( line.strip() for line in snapshots ) )[0:-keep]
+        snapshots = subprocess.check_output(cmd).decode('utf-8').split("\n")
+        snapshots = list(filter(lambda x: len( x ) > 0, ( line.strip() for line in snapshots ) ))[0:-keep]
+        n0 = len(snapshots)
+        debug('Considering %d snapshots of %s for expiry' % (n0, fs))
+        if n0 > 0 and zrepignore is False:
+            regexpstr = '.*@%s_[0-9a-f]{6}' % tag
+            regexp = re.compile(regexpstr)
+            snapshots = list(filter(regexp.match, snapshots))
+            n1 = len(snapshots)
+            debug('Ignoring %d snapshots due to tag mismatch' % (n0 - n1))
         return snapshots
     except subprocess.CalledProcessError as e:
         sys.exit(1)
 
-    # Strip whitespace, remove empty lines and the last snapshot from the list
+    # Strip whitespace, remove empty lines and the last <keep> snapshots from the list
+    # Also, filter by tags
 
 def expire(snapshot):
     if not options.noop:
@@ -114,7 +128,7 @@ options = process_options()
 config = options.config
 if config is not None:
     try:
-        with file(config) as f:
+        with open(config) as f:
             rules = f.readlines()
     except IOError as e:
         print(e)
@@ -130,76 +144,83 @@ filesystems = options.filesystem
 if options.allfs:
     filesystems = get_all_filesystems()
 
+tags = options.tags.split(',')
+
 for fs in filesystems:
+    for tag in tags:
 
-    snapshots = get_all_snapshots(fs, keep)
-    n = len(snapshots)
+        snapshots = get_all_snapshots(fs, keep, tag, options.zrepignore)
+        n = len(snapshots)
 
-    last_kept = None
+        last_kept = None
 
-    for i, line in enumerate(snapshots):
-        fields = line.split(None, 2)
-        snapname = fields[0]
-        zrepsent = fields[1]
-        created = datetime.strptime( fields[2], created_fmt )
-        created_str = created.strftime('%Y-%m-%d %H:%M:%S')
+        for i, line in enumerate(snapshots):
+            fields = line.split(None, 2)
+            snapname = fields[0]
+            zrepsent = fields[1]
+            created = datetime.strptime( fields[2], created_fmt )
+            created_str = created.strftime('%Y-%m-%d %H:%M:%S')
 
-        if re.match('.*@zrep_[0-9a-f]{6}', snapname) is None and options.zrepignore is False:
-            debug('Snapshot: %s not created by zrep; igoring. Use --zrep-ignore to overrride' % snapname)
-            continue
+            if last_kept is not None:
+                last_kept_str = last_kept.strftime('%Y-%m-%d %H:%M:%S')
 
-        if last_kept is not None:
-            last_kept_str = last_kept.strftime('%Y-%m-%d %H:%M:%S')
+            # Don't expire snapshots that have not been replicated. Only set last_kept if it has been set
+            # before, so an unreplicated snapshot cannot count as the oldest one.
+            if zrepsent == '-':
+                verbose('Snapshot: %s, created: %s, has not been replicated anywhere => KEEPING' % (snapname, created))
+                if last_kept is not None:
+                    last_kept = created
+                continue
 
-        # Is snapshot older than longest retention?
-        if created < parsed_rules[0][0]:
-            verbose("Snapshot: %s, created %s, oldest backup must be created after %s => EXPIRING" % (snapname,
-                created_str, parsed_rules[0][0].strftime('%Y-%m-%d %H:%M:%S')))
-            expire(snapname)
-            continue
+            # Is snapshot older than longest retention?
+            if created < parsed_rules[0][0]:
+                verbose("Snapshot: %s, created: %s, oldest backup must be created after %s => EXPIRING" % (snapname,
+                    created_str, parsed_rules[0][0].strftime('%Y-%m-%d %H:%M:%S')))
+                expire(snapname)
+                continue
 
-        # Snapshot is eligible for keeping. Keep the oldest backup.
-        if last_kept is None:
-            debug("Snapshot: %s, created %s, it is the first one => KEEPING" % (snapname, created_str))
-            last_kept = created
-            continue
+            # Snapshot is eligible for keeping. Keep the oldest backup.
+            if last_kept is None:
+                debug("Snapshot: %s, created: %s, it is the first one => KEEPING" % (snapname, created_str))
+                last_kept = created
+                continue
 
-        # From this point we can assume that last_kept is set
+            # From this point we can assume that last_kept is set
 
-        last_interval = parsed_rules[0][1]
-        delta = created - last_kept
+            last_interval = parsed_rules[0][1]
+            delta = created - last_kept
 
-        try:
-            for r in parsed_rules:
+            try:
+                for r in parsed_rules:
 
-                msg = "Snapshot: %s, created: %s, last kept: %s, delta: %s, interval: %s => %%s" % (snapname,
-                    created_str, last_kept_str, human_delta(delta), human_delta(last_interval))
+                    msg = "Snapshot: %s, created: %s, last kept: %s, delta: %s, interval: %s => %%s" % (snapname,
+                        created_str, last_kept_str, human_delta(delta), human_delta(last_interval))
 
-                if created < r[0]:
-                    # The snapshot is older than the current rule handles. Use interval of the previous rule.
-                    if delta < last_interval:
-                        verbose(msg % 'EXPIRING')
-                        expire(snapname)
-                    else:
-                        debug(msg % 'KEEPING')
-                        last_kept = created
+                    if created < r[0]:
+                        # The snapshot is older than the current rule handles. Use interval of the previous rule.
+                        if delta < last_interval:
+                            verbose(msg % 'EXPIRING')
+                            expire(snapname)
+                        else:
+                            debug(msg % 'KEEPING')
+                            last_kept = created
 
-                    # Break the parsed_rules loop and continue the snapshots loop
-                    raise continue_loop
+                        # Break the parsed_rules loop and continue the snapshots loop
+                        raise continue_loop
 
-                last_interval = r[1]
+                    last_interval = r[1]
 
-        except ContinueLoop:
-            continue
+            except ContinueLoop:
+                continue
 
-        # The snapshot is young enough for the most recent category. Use the current interval for expiry.
-        msg = "Snapshot: %s, created: %s, last kept: %s, delta: %s, interval: %s => %%s" % (snapname,
-            created_str, last_kept_str, human_delta(delta), human_delta(last_interval))
+            # The snapshot is young enough for the most recent category. Use the current interval for expiry.
+            msg = "Snapshot: %s, created: %s, last kept: %s, delta: %s, interval: %s => %%s" % (snapname,
+                created_str, last_kept_str, human_delta(delta), human_delta(last_interval))
 
-        if delta < last_interval:
-            verbose(msg % 'EXPIRING')
-            expire(snapname)
-        else:
-            debug(msg % 'KEEPING')
-            last_kept = created
+            if delta < last_interval:
+                verbose(msg % 'EXPIRING')
+                expire(snapname)
+            else:
+                debug(msg % 'KEEPING')
+                last_kept = created
 
