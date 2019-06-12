@@ -7,6 +7,9 @@ import sys
 import argparse
 import re
 from pprint import pprint,pformat
+#use the OS's locale in order to parse the dates correctly
+import locale
+locale.setlocale(locale.LC_TIME, "")
 
 # This program calls the 'zfs' utility to gather information. The output of the command is decoded
 # as UTF-8. If your system locale doesn't use UTF-8 encoding, change the 'get_all_filesystems'
