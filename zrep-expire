@@ -166,7 +166,7 @@ for fs in filesystems:
 
             # Don't expire snapshots that have not been replicated. Only set last_kept if it has been set
             # before, so an unreplicated snapshot cannot count as the oldest one.
-            if zrepsent == '-':
+            if zrepsent == '-' and options.zrepignore is False:
                 verbose('Snapshot: %s, created: %s, has not been replicated anywhere => KEEPING' % (snapname, created))
                 if last_kept is not None:
                     last_kept = created

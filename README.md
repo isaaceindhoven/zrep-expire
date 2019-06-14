@@ -43,7 +43,7 @@ Its workings are simple:
 
 1. For each ZFS filesystem specified as command line arguments, or for each ZFS filesystem found with `-a`, it gets a list of all existing snapshots that match the *zreptag* specified with the `-t` option (which is '*zrep*' by default). If multiple tags are given, it will get a list of snapshots and run the expiry for each tag in turn.
 2. It removes the last `KEEP` snapshots from the list, so they will never be removed.
-3. If a snapshot is not created by `zrep`, it will be skipped unless the `--zrep-ignore` option is specified. In that case, the given tags (`-t`) are ignored altogether.
+3. If a snapshot is not created by `zrep`, it will be skipped unless the `--zrep-ignore` option is specified. In that case, the given tags (`-t`) are ignored altogether. If not using the `--zrep-ignore` option, only snapshots which have already been sent/received by zrep will be expired.
 4. It matches the creation time of the snapshot against the first column (`MAX_AGE`) of the expiration rule, so see which retention interval should be applied.
 5. If the time delta between the current snapshot and the previous one is smaller than `MIN_INTERVAL`, the snapshot is removed.
 
